@@ -17,7 +17,7 @@ All website content, trademarks, logos, match data, and related assets remain th
 
 ## Requirements and Features 📑
 
-- Python 3
+- Python 3.10 and above
 - install Required Modules
 - Fastapi: **<https://fastapi.tiangolo.com/>**
 - Virtual Environment for Running FastAPI framework
@@ -91,20 +91,24 @@ http://localhost:6020/?score=150294
 ```json
 {
   "status": "success",
-  "title": "Sri Lanka A vs New Zealand A, 1st unofficial ODI, New Zealand A tour of Sri Lanka, 2026",
-  "score": "NZA 86/4 (17)",
+  "title": "NZ vs IND, 1st Test, India tour of New Zealand 2026",
+  "score": "IND 486/4 (125)",
+  "run_rate": "CRR: 3.89",
   "current_batsmen": [
     {
-      "name": "Simon Keene",
-      "score": "6(7)"
+      "name": "Rishabh Pant",
+      "score": "55(62)"
     },
     {
-      "name": "Muhammad Abbas",
-      "score": "10(29)"
+      "name": "Anshul Kamboj",
+      "score": "0(2)"
     }
   ],
   "current_bowler": {
-    "name": "Wanuja Sahan"
+    "name": "Kyle Jamieson",
+    "over": "27 over",
+    "runs": "57",
+    "wicket": "1"
   }
 }
 ```
@@ -118,12 +122,13 @@ http://localhost:6020/?score=150294&text=true
 ```sh
 🏏 Live Score
 │
-├── Match    : Sri Lanka A vs New Zealand A, 1st unofficial ODI, New Zealand A tour of Sri Lanka, 2026
-├── Score    : NZA 86/4 (17)
-├── Bowler   : Wanuja Sahan
+├── Match    : NZ vs IND, 1st Test, India tour of New Zealand 2026
+├── Score    : IND 486/4 (125)
+├── Run Rate : CRR: 3.89
+├── Bowler   : Kyle Jamieson (27 over, 57 runs, 1 wkt)
 ├── Batsmen
-│   ├── Simon Keene : 6(7)
-│   ├── Muhammad Abbas : 10(29)
+│   ├── Rishabh Pant : 55(62)
+│   ├── Anshul Kamboj : 0(2)
 ```
 
 - Swagger Docs
@@ -136,13 +141,13 @@ http://localhost:6020/docs
 
 ```sh
 ## Get score
-python cli.py --12345
+python3 cli.py --12345
 
 ## JSON View 
-python cli.py --12345 --json
+python3 cli.py --12345 --json
 
 ## Tree view
-python3 cli.py 12345 --text
+python33 cli.py 12345 --text
 ```
 
 ## LICENSE
