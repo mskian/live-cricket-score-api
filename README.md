@@ -85,13 +85,14 @@ WantedBy=multi-user.target
 - JSON
 
 ```sh
-http://localhost:6020/?score=150294
+http://localhost:6020/?score=161285
 ```
 
 ```json
 {
   "status": "success",
   "title": "NZ vs IND, 1st Test, India tour of New Zealand 2026",
+  "match_status": "Day 3: Stumps - India lead by 118 runs",
   "score": "IND 486/4 (125)",
   "run_rate": "CRR: 3.89",
   "current_batsmen": [
@@ -116,13 +117,14 @@ http://localhost:6020/?score=150294
 - Tree View
 
 ```sh
-http://localhost:6020/?score=150294&text=true
+http://localhost:6020/?score=161285&text=true
 ```
 
 ```sh
 🏏 Live Score
 │
 ├── Match    : NZ vs IND, 1st Test, India tour of New Zealand 2026
+├── Status   : Day 3: Stumps - India lead by 118 runs
 ├── Score    : IND 486/4 (125)
 ├── Run Rate : CRR: 3.89
 ├── Bowler   : Kyle Jamieson (27 over, 57 runs, 1 wkt)

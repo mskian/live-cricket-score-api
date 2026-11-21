@@ -57,12 +57,13 @@ class Bowler(BaseModel):
 class ScoreResponse(BaseModel):
     status: str
     title: str
+    match_status: str = NOT_FOUND
     score: str
     run_rate: str = NOT_FOUND
     current_batsmen: List[Batsman]
     current_bowler: Bowler
 
-    @field_validator("title", "score", "run_rate", mode="before")
+    @field_validator("title", "match_status", "score", "run_rate", mode="before")
     @classmethod
     def validate_fields(cls, value: Optional[str]) -> str:
         if not value or not str(value).strip():
@@ -103,7 +104,7 @@ class MatchValidator(BaseModel):
 
 app = FastAPI(
     title="Score API",
-    version="0.0.3",
+    version="0.0.4",
     description="Live Cricket Score JSON API",
     docs_url=None,
     redoc_url=None,
@@ -177,15 +178,117 @@ class ScoreService:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
+    STATUS_CLASS_PATTERN = re.compile(
+        r"(?:cb-text-(?:live|complete|stump|rain|abandon|delay|preview|inprogress|lunch|tea|inningsbreak)|"
+        r"text-cb(?:Text)?(?:Live|Complete|Preview|Stump|Rain|Abandon|Delay))",
+        re.IGNORECASE,
+    )
+
+    INVALID_STATUS_VALUES = {
+        "success",
+        "error",
+        "ok",
+        "true",
+        "false",
+        "null",
+        "none",
+        "live",
+        "complete",
+        "upcoming",
+        "preview",
+        "in progress",
+    }
+
     @staticmethod
     def clean(text: str) -> str:
         if not text:
             return NOT_FOUND
         return html.escape(" ".join(text.split()))
 
+    @staticmethod
+    def decode_json_string(value: str) -> str:
+        decoded = value.replace("\\/", "/").replace('\\"', '"')
+        decoded = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda m: chr(int(m.group(1), 16)),
+            decoded,
+        )
+        return " ".join(decoded.split()).strip()
+
+    @classmethod
+    def is_valid_match_status(cls, candidate: str) -> bool:
+        if not candidate:
+            return False
+        normalized = candidate.strip()
+        if len(normalized) < 4 or len(normalized) > 160:
+            return False
+        if normalized.lower() in cls.INVALID_STATUS_VALUES:
+            return False
+        if normalized.isdigit():
+            return False
+        if "http://" in normalized.lower() or "https://" in normalized.lower():
+            return False
+        return True
+
     @classmethod
     def default_batsmen(cls) -> List[Batsman]:
         return [Batsman(), Batsman()]
+
+    @classmethod
+    def extract_match_status(
+        cls, soup: BeautifulSoup, page_text: str, raw_html: str
+    ) -> str:
+        json_patterns = (
+            r'\\?"matchScoreDetails\\?"\s*:\s*\{[^{}]*?\\?"customStatus\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+            r'\\?"miniscore\\?"\s*:\s*\{.{0,1500}?\\?"(?:custStatus|customStatus|status)\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+            r'\\?"matchHeader\\?"\s*:\s*\{.{0,1500}?\\?"status\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+            r'\\?"(?:customStatus|custStatus)\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+        )
+
+        for pattern in json_patterns:
+            match = re.search(pattern, raw_html, re.DOTALL)
+            if match:
+                candidate = cls.decode_json_string(match.group(1))
+                if cls.is_valid_match_status(candidate):
+                    return cls.clean(candidate)
+
+        for tag in soup.find_all(["div", "span", "p"], class_=cls.STATUS_CLASS_PATTERN):
+            candidate = " ".join(tag.get_text(" ", strip=True).split())
+            if cls.is_valid_match_status(candidate):
+                return cls.clean(candidate)
+
+        text_patterns = (
+            r"(Day\s+\d+\s*:\s*(?:Stumps|Lunch|Tea|Dinner|Innings Break|Rain|Bad Light|Play Stopped|Session \d+)[^|•\n]{0,80})",
+            r"(Match\s+(?:abandoned|drawn|tied|delayed|starts|cancelled|suspended)[^|•\n]{0,80})",
+            r"([A-Za-z0-9 .'-]{2,40}\s+won\s+by\s+[^|•\n]{2,60})",
+            r"([A-Za-z0-9 .'-]{2,40}\s+opt(?:ed)?\s+to\s+(?:bat|bowl)[^|•\n]{0,40})",
+            r"([A-Za-z0-9 .'-]{2,40}\s+(?:lead|trail|need)\s+by\s+[^|•\n]{2,60})",
+            r"([A-Za-z0-9 .'-]{2,40}\s+need\s+\d+\s+runs?[^|•\n]{0,60})",
+            r"((?:Rain|Wet outfield|Bad light|Toss delayed|Play delayed|Play stopped|No result)[^|•\n]{0,80})",
+        )
+
+        for pattern in text_patterns:
+            match = re.search(pattern, page_text, re.IGNORECASE)
+            if match:
+                candidate = re.split(
+                    r"\s+(?:Batter|Bowler|CRR|REQ|Partnership|Last wicket|Commentary|Scorecard)\b",
+                    match.group(1),
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip(" -|•")
+                if cls.is_valid_match_status(candidate):
+                    return cls.clean(candidate)
+
+        state_match = re.search(
+            r'\\?"stateTitle\\?"\s*:\s*\\?"([^"\\]+)\\?"',
+            raw_html,
+        )
+        if state_match:
+            candidate = cls.decode_json_string(state_match.group(1))
+            if cls.is_valid_match_status(candidate):
+                return cls.clean(candidate)
+
+        return NOT_FOUND
 
     @classmethod
     def extract_batsman_from_json(cls, key: str, raw_html: str) -> Optional[Batsman]:
@@ -361,6 +464,7 @@ class ScoreService:
             "🏏 Live Score\n"
             "│\n"
             f"├── Match    : {data.title}\n"
+            f"├── Status   : {data.match_status}\n"
             f"├── Score    : {data.score}\n"
             f"├── Run Rate : {data.run_rate}\n"
             f"├── Bowler   : {bowler_info}\n"
@@ -415,6 +519,7 @@ class ScoreService:
                 score = f"{team} {runs}/{wickets} ({overs})"
 
             page_text = cls.clean(soup.get_text(" ", strip=True))
+            match_status = cls.extract_match_status(soup, page_text, raw_html)
             batsmen = cls.extract_batsmen(og_title, raw_html)
             run_rate = cls.extract_run_rate(page_text, raw_html)
             current_bowler = cls.extract_bowler(soup, page_text, raw_html)
@@ -422,6 +527,7 @@ class ScoreService:
             return ScoreResponse(
                 status="success",
                 title=title,
+                match_status=match_status,
                 score=score,
                 run_rate=run_rate,
                 current_batsmen=batsmen,
@@ -586,6 +692,7 @@ async def root(
         return ScoreResponse(
             status="success",
             title="Live Score API",
+            match_status=NOT_FOUND,
             score=NOT_FOUND,
             run_rate=NOT_FOUND,
             current_batsmen=ScoreService.default_batsmen(),
