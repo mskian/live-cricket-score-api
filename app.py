@@ -123,6 +123,7 @@ app.add_middleware(
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
 
+    response.headers["Content-Language"] = "en"
     response.headers["Cache-Control"] = (
         "no-store, no-cache, must-revalidate, "
         "proxy-revalidate, max-age=0"
