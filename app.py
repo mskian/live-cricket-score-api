@@ -103,7 +103,7 @@ class MatchValidator(BaseModel):
 
 app = FastAPI(
     title="Score API",
-    version="0.1.0",
+    version="0.1.1",
     description="Live Cricket Score JSON API",
     docs_url=None,
     redoc_url=None,
@@ -295,9 +295,91 @@ class ScoreService:
                 return text[start:end]
         return None
 
+    @staticmethod
+    def extract_top_level_scalar(
+        obj_str: Optional[str], keys: Tuple[str, ...]
+    ) -> Optional[str]:
+        if not obj_str or not obj_str.startswith("{"):
+            return None
+
+        target_keys = set(keys)
+        n = len(obj_str)
+        i = 0
+        depth = 0
+        arr_depth = 0
+
+        while i < n:
+            ch = obj_str[i]
+            if ch == "{":
+                depth += 1
+                i += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                i += 1
+                continue
+            if ch == "[":
+                arr_depth += 1
+                i += 1
+                continue
+            if ch == "]":
+                arr_depth -= 1
+                i += 1
+                continue
+
+            if ch == '"':
+                j = i + 1
+                while j < n:
+                    if obj_str[j] == "\\":
+                        j += 2
+                        continue
+                    if obj_str[j] == '"':
+                        break
+                    j += 1
+                token = obj_str[i + 1 : j]
+                i = j + 1
+
+                if depth == 1 and arr_depth == 0:
+                    k = i
+                    while k < n and obj_str[k].isspace():
+                        k += 1
+                    if k < n and obj_str[k] == ":":
+                        k += 1
+                        while k < n and obj_str[k].isspace():
+                            k += 1
+                        if token in target_keys and k < n:
+                            if obj_str[k] == '"':
+                                v_end = k + 1
+                                while v_end < n:
+                                    if obj_str[v_end] == "\\":
+                                        v_end += 2
+                                        continue
+                                    if obj_str[v_end] == '"':
+                                        break
+                                    v_end += 1
+                                val = obj_str[k + 1 : v_end]
+                                if val.lower() != "null":
+                                    return val
+                            elif obj_str[k] not in "{[":
+                                v_end = k
+                                while v_end < n and obj_str[v_end] not in ",}] \t\r\n":
+                                    v_end += 1
+                                val = obj_str[k:v_end]
+                                if val.lower() != "null":
+                                    return val
+                continue
+
+            i += 1
+
+        return None
+
+    @classmethod
+    def extract_miniscore_object(cls, norm_html: str) -> Optional[str]:
+        return cls.extract_json_object(norm_html, "miniscore")
+
     @classmethod
     def extract_miniscore_scope(cls, norm_html: str) -> str:
-        obj = cls.extract_json_object(norm_html, "miniscore")
+        obj = cls.extract_miniscore_object(norm_html)
         if obj:
             return f'"miniscore":{obj}'
         match = re.search(r'"miniscore"\s*:\s*\{', norm_html)
@@ -324,7 +406,9 @@ class ScoreService:
         if not raw_name:
             return NOT_FOUND
         name = cls.UI_NOISE_RE.sub("", raw_name)
-        name = re.sub(r"\s*\((?:c|wk|c\s*&\s*wk|sub)\)\s*", " ", name, flags=re.IGNORECASE)
+        name = re.sub(
+            r"\s*\((?:c|wk|c\s*&\s*wk|sub)\)\s*", " ", name, flags=re.IGNORECASE
+        )
         name = name.replace("*", " ")
         name = cls.clean(name)
         if name == NOT_FOUND:
@@ -342,7 +426,10 @@ class ScoreService:
             return False
         if lower_val in cls.INVALID_PLAYER_NAMES:
             return False
-        if any(marker in lower_val for marker in ("view profile", "match performance", "http://", "https://")):
+        if any(
+            marker in lower_val
+            for marker in ("view profile", "match performance", "http://", "https://")
+        ):
             return False
         if not re.search(r"[A-Za-zÀ-ÿ]", normalized):
             return False
@@ -422,7 +509,7 @@ class ScoreService:
             current["runs"] = live_runs
         if live_wkts is not None:
             current["wickets"] = live_wkts
-        if live_overs:
+        if live_overs and cls.is_valid_overs(cls.format_overs_value(live_overs)):
             current["overs"] = cls.format_overs_value(live_overs)
 
         team = str(current.get("team") or "").strip()
@@ -533,13 +620,13 @@ class ScoreService:
 
         header_obj = cls.extract_json_object(norm_html, "matchHeader")
         if header_obj:
-            desc_m = re.search(r'"matchDescription"\s*:\s*"([^"]+)"', header_obj)
-            series_m = re.search(r'"seriesName"\s*:\s*"([^"]+)"', header_obj)
+            desc_val = cls.extract_top_level_scalar(header_obj, ("matchDescription",))
+            series_val = cls.extract_top_level_scalar(header_obj, ("seriesName",))
             parts = []
-            if desc_m:
-                parts.append(cls.decode_json_string(desc_m.group(1)))
-            if series_m:
-                parts.append(cls.decode_json_string(series_m.group(1)))
+            if desc_val:
+                parts.append(cls.decode_json_string(desc_val))
+            if series_val:
+                parts.append(cls.decode_json_string(series_val))
             if parts:
                 return cls.clean(", ".join(parts))
 
@@ -547,44 +634,51 @@ class ScoreService:
 
     @classmethod
     def extract_score_and_context(
-        cls, og_title: str, page_text: str, miniscore_html: str, norm_html: str
+        cls,
+        og_title: str,
+        page_text: str,
+        miniscore_obj: Optional[str],
+        miniscore_html: str,
+        norm_html: str,
     ) -> Tuple[str, Optional[int], Optional[str]]:
         innings = cls.extract_innings_list(miniscore_html)
         if not innings and miniscore_html is not norm_html:
             innings = cls.extract_innings_list(norm_html)
 
         if innings:
-            active_id_m = re.search(
-                r'"miniscore"\s*:\s*\{.{0,1200}?"inningsId"\s*:\s*(\d+)',
-                miniscore_html,
-                re.DOTALL,
+            active_id_str = cls.extract_top_level_scalar(miniscore_obj, ("inningsId",))
+            active_id = (
+                int(active_id_str)
+                if active_id_str and active_id_str.isdigit()
+                else None
             )
-            active_id = int(active_id_m.group(1)) if active_id_m else None
 
             live_runs: Optional[int] = None
             live_wkts: Optional[int] = None
             bat_team_obj = cls.extract_json_object(miniscore_html, "batTeam")
             if bat_team_obj:
-                bt_str_score = re.search(
-                    r'"teamScore"\s*:\s*"(\d+)[/-](\d+)"', bat_team_obj
+                bt_score_val = cls.extract_top_level_scalar(
+                    bat_team_obj, ("teamScore",)
                 )
-                if bt_str_score:
-                    live_runs = int(bt_str_score.group(1))
-                    live_wkts = int(bt_str_score.group(2))
-                else:
-                    bt_runs = re.search(r'"teamScore"\s*:\s*(\d+)', bat_team_obj)
-                    bt_wkts = re.search(r'"teamWkts"\s*:\s*(\d+)', bat_team_obj)
-                    if bt_runs:
-                        live_runs = int(bt_runs.group(1))
-                        if bt_wkts:
-                            live_wkts = int(bt_wkts.group(1))
+                bt_wkts_val = cls.extract_top_level_scalar(
+                    bat_team_obj, ("teamWkts",)
+                )
+                if bt_score_val:
+                    slash_m = re.fullmatch(r"(\d+)[/-](\d+)", bt_score_val.strip())
+                    if slash_m:
+                        live_runs = int(slash_m.group(1))
+                        live_wkts = int(slash_m.group(2))
+                    elif bt_score_val.strip().isdigit():
+                        live_runs = int(bt_score_val.strip())
+                        if bt_wkts_val and bt_wkts_val.strip().isdigit():
+                            live_wkts = int(bt_wkts_val.strip())
 
-            live_overs_m = re.search(
-                r'"miniscore"\s*:\s*\{.{0,1500}?"overs"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?',
-                miniscore_html,
-                re.DOTALL,
-            )
-            live_overs = live_overs_m.group(1) if live_overs_m else None
+            top_overs_raw = cls.extract_top_level_scalar(miniscore_obj, ("overs",))
+            live_overs: Optional[str] = None
+            if top_overs_raw:
+                formatted = cls.format_overs_value(top_overs_raw)
+                if cls.is_valid_overs(formatted):
+                    live_overs = formatted
 
             return cls.build_score_from_innings(
                 innings,
@@ -647,22 +741,40 @@ class ScoreService:
 
     @classmethod
     def extract_match_status(
-        cls, soup: BeautifulSoup, page_text: str, miniscore_html: str, norm_html: str
+        cls,
+        soup: BeautifulSoup,
+        page_text: str,
+        miniscore_obj: Optional[str],
+        miniscore_html: str,
+        norm_html: str,
     ) -> str:
-        json_patterns = (
-            r'"matchScoreDetails"\s*:\s*\{[^{}]*?"customStatus"\s*:\s*"([^"]+)"',
-            r'"miniscore"\s*:\s*\{.{0,2000}?"(?:custStatus|customStatus|status)"\s*:\s*"([^"]+)"',
-            r'"matchHeader"\s*:\s*\{.{0,2000}?"status"\s*:\s*"([^"]+)"',
-            r'"(?:customStatus|custStatus)"\s*:\s*"([^"]+)"',
+        top_status = cls.extract_top_level_scalar(
+            miniscore_obj, ("custStatus", "customStatus", "status")
         )
+        if top_status:
+            candidate = cls.decode_json_string(top_status)
+            if cls.is_valid_match_status(candidate):
+                return cls.clean(candidate)
 
-        for target in (miniscore_html, norm_html):
-            for pattern in json_patterns:
-                match = re.search(pattern, target, re.DOTALL)
-                if match:
-                    candidate = cls.decode_json_string(match.group(1))
-                    if cls.is_valid_match_status(candidate):
-                        return cls.clean(candidate)
+        score_details_obj = cls.extract_json_object(miniscore_html, "matchScoreDetails")
+        if score_details_obj:
+            sd_status = cls.extract_top_level_scalar(
+                score_details_obj, ("customStatus", "custStatus", "status")
+            )
+            if sd_status:
+                candidate = cls.decode_json_string(sd_status)
+                if cls.is_valid_match_status(candidate):
+                    return cls.clean(candidate)
+
+        header_obj = cls.extract_json_object(norm_html, "matchHeader")
+        if header_obj:
+            hdr_status = cls.extract_top_level_scalar(
+                header_obj, ("status", "stateTitle")
+            )
+            if hdr_status:
+                candidate = cls.decode_json_string(hdr_status)
+                if cls.is_valid_match_status(candidate):
+                    return cls.clean(candidate)
 
         for tag in soup.find_all(["div", "span", "p"], class_=cls.STATUS_CLASS_PATTERN):
             candidate = " ".join(tag.get_text(" ", strip=True).split())
@@ -691,15 +803,6 @@ class ScoreService:
                 if cls.is_valid_match_status(candidate):
                     return cls.clean(candidate)
 
-        state_match = re.search(
-            r'"stateTitle"\s*:\s*"([^"]+)"',
-            norm_html,
-        )
-        if state_match:
-            candidate = cls.decode_json_string(state_match.group(1))
-            if cls.is_valid_match_status(candidate):
-                return cls.clean(candidate)
-
         return NOT_FOUND
 
     @classmethod
@@ -708,19 +811,19 @@ class ScoreService:
         if not block:
             return None
 
-        name_m = re.search(r'"(?:batName|name|nickName)"\s*:\s*"([^"]+)"', block)
-        if not name_m:
+        raw_name = cls.extract_top_level_scalar(block, ("batName", "name", "nickName"))
+        if not raw_name:
             return None
 
-        name = cls.clean_player_name(cls.decode_json_string(name_m.group(1)))
+        name = cls.clean_player_name(cls.decode_json_string(raw_name))
         if name == NOT_FOUND:
             return None
 
-        runs_m = re.search(r'"(?:batRuns|runs)"\s*:\s*"?(\d+)"?', block)
-        balls_m = re.search(r'"(?:batBalls|balls)"\s*:\s*"?(\d+)"?', block)
+        runs_raw = cls.extract_top_level_scalar(block, ("batRuns", "runs"))
+        balls_raw = cls.extract_top_level_scalar(block, ("batBalls", "balls"))
 
-        runs_val = runs_m.group(1) if runs_m else "0"
-        balls_val = balls_m.group(1) if balls_m else "0"
+        runs_val = runs_raw if runs_raw and runs_raw.isdigit() else "0"
+        balls_val = balls_raw if balls_raw and balls_raw.isdigit() else "0"
         return Batsman(name=name, score=f"{runs_val}({balls_val})")
 
     @classmethod
@@ -741,7 +844,9 @@ class ScoreService:
         for link in batter_header.find_all_next(
             "a", href=re.compile(r"/profiles/"), limit=10
         ):
-            if bowler_header and bowler_header in link.find_all_previous(string=True, limit=40):
+            if bowler_header and bowler_header in link.find_all_previous(
+                string=True, limit=40
+            ):
                 break
 
             name = cls.clean_player_name(link.get_text(" ", strip=True))
@@ -800,7 +905,9 @@ class ScoreService:
             name = cls.clean_player_name(match.group(1))
             if name == NOT_FOUND or name.lower() in existing:
                 continue
-            batsmen.append(Batsman(name=name, score=f"{match.group(2)}({match.group(3)})"))
+            batsmen.append(
+                Batsman(name=name, score=f"{match.group(2)}({match.group(3)})")
+            )
             existing.add(name.lower())
             if len(batsmen) == 2:
                 break
@@ -866,51 +973,46 @@ class ScoreService:
     def extract_run_rate(
         cls,
         page_text: str,
-        miniscore_html: str,
-        norm_html: str,
+        miniscore_obj: Optional[str],
         runs: Optional[int] = None,
         overs: Optional[str] = None,
     ) -> str:
+        computed = (
+            cls.compute_run_rate(runs, overs)
+            if runs is not None and overs
+            else None
+        )
+
+        top_crr = cls.extract_top_level_scalar(
+            miniscore_obj, ("currentRunRate", "crr")
+        )
+        if top_crr:
+            try:
+                crr_num = float(top_crr)
+                if crr_num > 0:
+                    if computed is not None:
+                        if "." in top_crr and abs(crr_num - float(computed)) <= 0.25:
+                            return f"CRR: {crr_num:.2f}"
+                        return f"CRR: {computed}"
+                    return f"CRR: {crr_num:.2f}"
+            except ValueError:
+                pass
+
+        if computed is not None:
+            return f"CRR: {computed}"
+
         text_matches = re.findall(
             r"\bCRR\s*:?\s*([0-9]+(?:\.[0-9]+)?)",
             page_text,
             re.IGNORECASE,
         )
         for val in text_matches:
-            if "." in val:
-                return f"CRR: {val}"
-
-        for target in (miniscore_html, norm_html):
-            json_matches = re.findall(
-                r'"(?:currentRunRate|crr)"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?',
-                target,
-            )
-            for val in json_matches:
-                if "." in val:
-                    return f"CRR: {val}"
-
-        if runs is not None and overs:
-            computed = cls.compute_run_rate(runs, overs)
-            if computed:
-                return f"CRR: {computed}"
-
-        if text_matches:
             try:
-                return f"CRR: {float(text_matches[0]):.2f}"
+                num = float(val)
+                if num > 0:
+                    return f"CRR: {num:.2f}"
             except ValueError:
-                return f"CRR: {text_matches[0]}"
-
-        json_fallback = re.search(
-            r'"(?:currentRunRate|crr)"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?',
-            miniscore_html,
-        )
-        if json_fallback:
-            try:
-                val = float(json_fallback.group(1))
-                if val > 0:
-                    return f"CRR: {val:.2f}"
-            except ValueError:
-                return f"CRR: {json_fallback.group(1)}"
+                continue
 
         return NOT_FOUND
 
@@ -920,26 +1022,32 @@ class ScoreService:
         if not block:
             return None
 
-        name_m = re.search(r'"(?:bowlName|name|nickName)"\s*:\s*"([^"]+)"', block)
-        if not name_m:
+        raw_name = cls.extract_top_level_scalar(block, ("bowlName", "name", "nickName"))
+        if not raw_name:
             return None
 
-        name = cls.clean_player_name(cls.decode_json_string(name_m.group(1)))
+        name = cls.clean_player_name(cls.decode_json_string(raw_name))
         if name == NOT_FOUND:
             return None
 
-        ovs_m = re.search(r'"(?:bowlOvs|overs)"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?', block)
-        runs_m = re.search(r'"(?:bowlRuns|runs)"\s*:\s*"?(\d+)"?', block)
-        wkts_m = re.search(r'"(?:bowlWkts|wickets)"\s*:\s*"?(\d+)"?', block)
+        ovs_raw = cls.extract_top_level_scalar(block, ("bowlOvs",))
+        if not ovs_raw:
+            ovs_raw = cls.extract_top_level_scalar(block, ("overs",))
+        runs_raw = cls.extract_top_level_scalar(block, ("bowlRuns", "runs"))
+        wkts_raw = cls.extract_top_level_scalar(block, ("bowlWkts", "wickets"))
 
-        overs_clean = cls.format_overs_value(ovs_m.group(1)) if ovs_m else ""
+        overs_clean = cls.format_overs_value(ovs_raw) if ovs_raw else ""
         has_valid_overs = bool(overs_clean and cls.is_valid_overs(overs_clean))
 
         overs_val = f"{overs_clean} over" if has_valid_overs else NOT_FOUND
-        runs_val = runs_m.group(1) if runs_m else ("0" if has_valid_overs else NOT_FOUND)
+        runs_val = (
+            runs_raw
+            if runs_raw and runs_raw.isdigit()
+            else ("0" if has_valid_overs else NOT_FOUND)
+        )
         wkts_val = (
-            wkts_m.group(1)
-            if wkts_m and 0 <= int(wkts_m.group(1)) <= 10
+            wkts_raw
+            if wkts_raw and wkts_raw.isdigit() and 0 <= int(wkts_raw) <= 10
             else ("0" if has_valid_overs else NOT_FOUND)
         )
 
@@ -1141,7 +1249,12 @@ class ScoreService:
                         continue
 
                     norm_html = cls.normalize_json_html(raw_html)
-                    miniscore_html = cls.extract_miniscore_scope(norm_html)
+                    miniscore_obj = cls.extract_miniscore_object(norm_html)
+                    miniscore_html = (
+                        f'"miniscore":{miniscore_obj}'
+                        if miniscore_obj
+                        else cls.extract_miniscore_scope(norm_html)
+                    )
                     soup = BeautifulSoup(raw_html, "lxml")
 
                     title = cls.extract_title(soup, norm_html)
@@ -1159,16 +1272,16 @@ class ScoreService:
                     page_text = cls.clean(soup.get_text(" ", strip=True))
 
                     score, live_runs, live_overs = cls.extract_score_and_context(
-                        og_title, page_text, miniscore_html, norm_html
+                        og_title, page_text, miniscore_obj, miniscore_html, norm_html
                     )
                     match_status = cls.extract_match_status(
-                        soup, page_text, miniscore_html, norm_html
+                        soup, page_text, miniscore_obj, miniscore_html, norm_html
                     )
                     batsmen = cls.extract_batsmen(
                         soup, og_title, page_text, miniscore_html, norm_html
                     )
                     run_rate = cls.extract_run_rate(
-                        page_text, miniscore_html, norm_html, live_runs, live_overs
+                        page_text, miniscore_obj, live_runs, live_overs
                     )
                     current_bowler = cls.extract_bowler(
                         soup, page_text, miniscore_html, norm_html
